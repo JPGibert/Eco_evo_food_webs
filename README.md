@@ -8,4 +8,4 @@ Code file name: "FW_eco_evo_CODE", which was written in Atom for Julia v0.6.2
 
 Workspace files: 
 "tradeoff_1.jld", needed for Fig 2
-"results_workspace.jld", needed for Fgis 2 & 3
+"results_workspace.jld", needed for Figs 2 & 3
