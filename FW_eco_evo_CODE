@@ -1,0 +1,1102 @@
+  ##########################################################
+  ########        Eco-evo and Food web structure    ########
+  #######            Jean P. Gibert,  2018            ######
+  ##########################################################
+
+
+###################################################################################
+###-------------------------------------------------------------------------------
+## GENERAL DYNAMICS USING TRADEOFF BETWEEN ATTACK RATE AND CONVERSION EFFCICIENCY
+###-------------------------------------------------------------------------------
+###################################################################################
+
+## Multi-core capacity recommended, init julia through command line USING
+#julia -p CORES
+# where CORES is the number of cores your computer has
+# e.g.: julia -p 36 (inits julia with access to 36 cores)
+
+## Loading packages and whatnot
+@everywhere using DifferentialEquations
+@everywhere using RCall
+#@everywhere using ProgressMeter
+@everywhere using StatsBase
+@everywhere using HDF5
+@everywhere using JLD
+@everywhere using DataFrames
+
+## Loading R packages through RCall
+R"library('akima')          # Important for heatmaps
+library('fields')           # Important for heatmaps
+library('RColorBrewer')
+library('latex2exp')"
+
+
+# Form of the tradeoff: e = Exp[-g(a-a_init)], where a_init is the attack rate at t=0
+# Defines system of differential equations:
+ @everywhere function parameterized_LV_II_evol_TO(du,u,p,t) # used to be (t,u,p,du)
+    # R
+    du[1] = p[1]*u[1]*(1-u[1]/p[2]) - u[4]*u[1]*u[2]/(1+u[4]*p[11]*u[1]) - u[5]*u[1]*u[3]/(1+u[5]*p[12]*u[1])
+    # C1
+    du[2] = p[6]*exp(-p[14]*(u[4]-p[17]))*u[4]*u[1]*u[2]/(1+u[4]*p[11]*u[1]) - p[9]*u[2] - u[6]*u[2]*u[3]/(1+u[6]*p[13]*u[2])
+    # C2
+    du[3] = p[7]*exp(-p[15]*(u[5]-p[17]))*u[5]*u[1]*u[3]/(1+u[5]*p[12]*u[1]) + p[8]*exp(-p[16]*(u[6]-p[17]))*u[6]*u[2]*u[3]/(1+u[6]*p[13]*u[2]) - p[10]*u[3]
+    #
+    # a_RC1
+    du[4]=p[3]*p[6]*exp(-p[14]*(u[4]-p[17]))*(1-u[4]*p[14]-u[1]*p[11]*p[14]*u[4]^2)*u[1]/((1+u[4]*p[11]*u[1])^2) # hvar_RC1*e_RC1*R/(1+h_RC1*a_RC1*R)^2
+    # a_RC2
+    du[5]=p[4]*p[7]*exp(-p[15]*(u[5]-p[17]))*(1-u[5]*p[15]-u[1]*p[12]*p[15]*u[5]^2)*u[1]/((1+u[5]*p[12]*u[1])^2) # hvar_RC2*e_RC2*R/(1+h_RC2*a_RC2*r)^2
+    # a_C1C2
+    du[6]=p[5]*p[8]*exp(-p[16]*(u[6]-p[17]))*(1-u[6]*p[16]-u[1]*p[13]*p[16]*u[6]^2)*u[2]/((1+u[6]*p[13]*u[2])^2) # hvar_C1C2*e_C1C2*C1/(1+a_C1C2*h_C1C2*C1)^2
+end
+
+# Param order to pass to diff eq solver
+#[1=r,2=K,3=hvar_RC1,4=hvar_RC2,5=hvar_C1C2,6=e_RC1,7=e_RC2
+#            8=e_C1C2,9=d_C1,10=d_C2,11=h_RC1, 12=h_RC2, 13=h_C1C2
+#               14=gamma_C1R, 15=gamma_C2R, 16=gamma_C1C2, 17= a_init]
+
+## NO EVOL sample dynamics
+p = [1.5,5,0.1,0.1,0.1,0.8,0.2,0.8,0.8,0.8,0.5,1,1,1.5,1,1,1]; # Start with h_var=(0,0,0)
+    # Deprecated in DiffEqs 4.0.0:
+#pf_evol = ParameterizedFunction(parameterized_LV_II_evol_TO,p);
+u0 = [2.0;1;1;1;1;1];   # [R,C1,C2,a_RC1,a_RC2,a_C1C2]
+tspan = (0.0,10000);
+    # Same here
+#prob_evol = ODEProblem(pf_evol,u0,tspan);
+prob_evol = ODEProblem(parameterized_LV_II_evol_TO,u0,tspan,p);
+sol_evol = solve(prob_evol,adaptive=false,dt=0.075);
+# Prepare to plot
+sol_evol=sol_evol(0:1:10000);
+sol_evol=hcat(sol_evol...)';
+time=collect(linspace(0,10000,10001));
+burnin=4000;
+
+R"
+dev.new()
+par(mfrow=c(1,2))
+# Fig 1 A
+
+plot($time,$sol_evol[,1],ylab='s',lwd=2, col='green', type='l', ylim=c(0,20))
+lines($time,$sol_evol[,2],ylab='s',lwd=2, col='yellow')
+lines($time,$sol_evol[,3],ylab='s',lwd=2, col='blue')
+
+plot($time,$sol_evol[,4],ylab='s',lwd=2, col='green',type='l', ylim=c(0,3))
+lines($time,$sol_evol[,5],ylab='s',lwd=2, col='blue', ylim=c(0,3))
+lines($time,$sol_evol[,6],ylab='s',lwd=2, col='blue',lty=2, ylim=c(0,3))
+"
+
+### -------------------------------------------------------------------------------
+##  General dynamics (FIG 1)
+### -------------------------------------------------------------------------------
+#[1=r,2=K,3=hvar_RC1,4=hvar_RC2,5=hvar_C1C2,6=e_RC1,7=e_RC2
+#            8=e_C1C2,9=d_C1,10=d_C2,11=h_RC1, 12=h_RC2, 13=h_C1C2
+#               14=gamma_C1R, 15=gamma_C2R, 16=gamma_C1C2, 17= a_init]
+
+p1 = [1.5,5,0.1,0.1,0.1,0.8,0.2,0.8,0.8,0.8,0.5,0.5,0.5,0.1,1,1,1]; # Start with h_var=(0,0,0)
+p2 = [1.5,5,0.1,0.1,0.1,0.8,0.2,0.8,0.8,0.8,0.5,0.5,0.5,0.5,1,1,1];
+    # Deprecated in DiffEqs 4.0.0:
+#pf_evol = ParameterizedFunction(parameterized_LV_II_evol_TO,p);
+u0 = [2.0;1;1;1;1;1];   # [R,C1,C2,a_RC1,a_RC2,a_C1C2]
+tspan = (0.0,10000);
+    # Same here
+#prob_evol = ODEProblem(pf_evol,u0,tspan);
+prob_evol1 = ODEProblem(parameterized_LV_II_evol_TO,u0,tspan,p1);
+prob_evol2 = ODEProblem(parameterized_LV_II_evol_TO,u0,tspan,p2);
+sol_evol1 = solve(prob_evol1,adaptive=false,dt=0.075);
+sol_evol2 = solve(prob_evol2,adaptive=false,dt=0.075);
+# Prepare to plot
+sol_evol1=sol_evol1(0:1:10000);
+sol_evol2=sol_evol2(0:1:10000);
+sol_evol1=hcat(sol_evol1...)';
+sol_evol2=hcat(sol_evol2...)';
+time=collect(linspace(0,10000,10001));
+burnin=4000;
+
+R"
+dev.new()
+par(mfrow=c(3,2),mar=c(2, 2.4, 0.5, 0.5),oma=c(1.5,2,1,1))
+# Fig 1 A
+
+plot(1, col='white', axes=FALSE, ylab='', xlab='')
+
+curve(0.8*exp(-0.01*(x-1)), 1, 2, ylim=c(0,1),axes=FALSE,xlab='',ylab='',main='',lwd=2,col=rgb(0.85,0.85,0.85))
+curve(0.8*exp(-0.2*(x-1)), 1, 2, add=TRUE,lwd=2,col=rgb(0.7,0.7,0.7))
+curve(0.8*exp(-1*(x-1)), 1, 2, add=TRUE,lwd=2,col=rgb(0.4,0.4,0.4))
+curve(0.8*exp(-2*(x-1)), 1, 2, add=TRUE,lwd=2,col=rgb(0,0,0))
+box(lwd=2, bty='l')
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,1,0.2), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+mtext(TeX('Attack rate $(\\alpha_)'),1, line=2.2, cex=1.05)
+mtext(TeX('Conversion efficiency $(\\epsilon)'),2,line=2.1, cex=1.05)
+
+plot($time,$sol_evol1[,1],lwd=2, col=rgb(0.8,0.8,0.8), type='l', ylim=c(0,5), xlim=c(0,800),
+axes=FALSE, ylab='', xlab='')
+lines($time,$sol_evol1[,2],ylab='s',lwd=2, col=rgb(0,0,0))
+lines($time,$sol_evol1[,3],ylab='s',lwd=2, col=rgb(1,0,0))
+box(lwd=2, bty='l')
+axis(1,at=seq(0,800,200), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,5,1), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+#mtext(TeX('Time'),1, line=2.2, cex=1.05)
+mtext(TeX('Abundance'),2,line=2.1, cex=1.05)
+
+plot($time,$sol_evol2[,1],lwd=2, col=rgb(0.8,0.8,0.8), type='l', ylim=c(0,5), xlim=c(0,800),
+axes=FALSE, ylab='', xlab='')
+lines($time,$sol_evol2[,2],ylab='s',lwd=2, col=rgb(0,0,0))
+lines($time,$sol_evol2[,3],ylab='s',lwd=2, col=rgb(1,0,0))
+box(lwd=2, bty='l')
+axis(1,at=seq(0,800,200), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,5,1), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+#mtext(TeX('Time'),1, line=2.2, cex=1.05)
+#mtext(TeX('Abundance'),2,line=2.1, cex=1.05)
+
+plot($time,$sol_evol1[,4],lwd=2, col=rgb(0,0,0),type='l', ylim=c(0,3), xlim=c(0,800),
+axes=FALSE, ylab='', xlab='')
+lines($time,$sol_evol1[,5],ylab='s',lwd=2, col=rgb(1,0.6,0.6), ylim=c(0,3))
+lines($time,$sol_evol1[,6],ylab='s',lwd=2, col=rgb(1,0,0), ylim=c(0,3))
+box(lwd=2, bty='l')
+axis(1,at=seq(0,800,200), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,3,1), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+mtext(TeX('Time'),1, line=2.2, cex=1.05)
+mtext(TeX('Attack rate $(\\alpha_)'),2,line=2.1, cex=1.05)
+
+plot($time,$sol_evol2[,4],lwd=2, col=rgb(0,0,0),type='l', ylim=c(0,3), xlim=c(0,800),
+axes=FALSE, ylab='', xlab='')
+lines($time,$sol_evol2[,5],ylab='s',lwd=2, col=rgb(1,0.6,0.6), ylim=c(0,3))
+lines($time,$sol_evol2[,6],ylab='s',lwd=2, col=rgb(1,0,0), ylim=c(0,3))
+box(lwd=2, bty='l')
+axis(1,at=seq(0,800,200), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,3,1), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+mtext(TeX('Time'),1, line=2.2, cex=1.05)
+#mtext(TeX('Abundance'),2,line=2.1, cex=1.05)
+"
+
+
+
+### -------------------------------------------------------------------------------
+##  Bifurcation diagrams (FIG 2)
+### -------------------------------------------------------------------------------
+# Use of DiffEqs 4.0.0 changed the way parameters are passed to ODE problems.
+# No need to use the ParameterizedFunction command anymore, now parameters
+# passed directly to the ODE problem as ODEProblem(func,u0,t,p), where p are the params.
+
+## 1) For ATTACK RATES (THIS IS NOT IN THE PAPER)
+## Eco dynamics, NO Evolution
+attack = collect(linspace(1,2,400));
+Pred_max_1 = SharedArray{Float64}(400);Pred_max_2 = SharedArray{Float64}(400);Pred_max_3 = SharedArray{Float64}(400);
+Pred_min_1 = SharedArray{Float64}(400);Pred_min_2 = SharedArray{Float64}(400);Pred_min_3 = SharedArray{Float64}(400);
+Int_max_1 = SharedArray{Float64}(400);Int_max_2 = SharedArray{Float64}(400);Int_max_3 = SharedArray{Float64}(400);
+Int_min_1 = SharedArray{Float64}(400);Int_min_2 = SharedArray{Float64}(400);Int_min_3 = SharedArray{Float64}(400);
+
+Pred_N_1 = SharedArray{Float64}(400);Pred_N_2 = SharedArray{Float64}(400);Pred_N_3 = SharedArray{Float64}(400);
+Int_N_1 = SharedArray{Float64}(400);Int_N_2 = SharedArray{Float64}(400);Int_N_3 = SharedArray{Float64}(400);
+
+TL_pre_1 = SharedArray{Float64}(400);TL_pre_2 = SharedArray{Float64}(400);TL_pre_3 = SharedArray{Float64}(400);
+slope_pre_1 = SharedArray{Float64}(400);slope_pre_2 = SharedArray{Float64}(400);slope_pre_3 = SharedArray{Float64}(400);
+
+tspan = (0.0,4000);
+burnin = 8000;
+
+tradeoff = (1,1.5,2);
+#tradeoff = 0.1
+folder_names = ["/Users/jeangibert/Desktop/JP/Papers_in_review_submitted/Justin_var_TL/attack_1.jld",
+"/Users/jeangibert/Desktop/JP/Papers_in_review_submitted/Justin_var_TL/attack_2.jld",
+"/Users/jeangibert/Desktop/JP/Papers_in_review_submitted/Justin_var_TL/attack_3.jld"]
+
+
+# Needs to run trice for each value of tradeoff = 0.1, 0.2, 0.5
+
+@time for j in 1:1
+    @sync @parallel for i in 1:400
+        #[1=r,2=K,3=hvar_RC1,4=hvar_RC2,5=hvar_C1C2,6=e_RC1,7=e_RC2
+        #            8=e_C1C2,9=d_C1,10=d_C2,11=h_RC1, 12=h_RC2, 13=h_C1C2
+        #               14=gamma_C1R, 15=gamma_C2R, 16=gamma_C1C2, 17= a_init]
+        p = [1.5,5,0,0,0,0.8,0.2,0.8,0.8,0.8,0.5,0.5,0.5,tradeoff[j],tradeoff[j],tradeoff[j],1];
+        u_1 = [2.0;1;1;attack[i];1;1]; # [R,C1,C2,a_RC1,a_RC2,a_C1C2]
+        u_2 = [2.0;1;1;1;attack[i];1]; # [R,C1,C2,a_RC1,a_RC2,a_C1C2]
+        u_3 = [2.0;1;1;1;1;attack[i]]; # [R,C1,C2,a_RC1,a_RC2,a_C1C2]
+        #pf_evol = ParameterizedFunction(parameterized_LV_II_evol_TO,p);
+        prob_1 = ODEProblem(parameterized_LV_II_evol_TO,u_1,tspan,p);
+        prob_2 = ODEProblem(parameterized_LV_II_evol_TO,u_2,tspan,p);
+        prob_3 = ODEProblem(parameterized_LV_II_evol_TO,u_3,tspan,p);
+        sol_1 = solve(prob_1, adaptive=false,dt=0.075)
+        sol_2 = solve(prob_2, adaptive=false,dt=0.075)
+        sol_3 = solve(prob_3, adaptive=false,dt=0.075)
+        sol_toplot_1 = hcat(sol_1.u...)'
+        sol_toplot_2 = hcat(sol_2.u...)'
+        sol_toplot_3 = hcat(sol_3.u...)'
+
+        # Store mins and max
+        Pred_max_1[i] = maximum(sol_toplot_1[(end-burnin):end,3]); Pred_max_2[i] = maximum(sol_toplot_2[(end-burnin):end,3]); Pred_max_3[i] = maximum(sol_toplot_3[(end-burnin):end,3]);
+        Pred_min_1[i] = minimum(sol_toplot_1[(end-burnin):end,3]);Pred_min_2[i] = minimum(sol_toplot_2[(end-burnin):end,3]);Pred_min_3[i] = minimum(sol_toplot_3[(end-burnin):end,3]);
+        Int_max_1[i] = maximum(sol_toplot_1[(end-burnin):end,2]); Int_max_2[i] = maximum(sol_toplot_2[(end-burnin):end,2]); Int_max_3[i] = maximum(sol_toplot_3[(end-burnin):end,2]);
+        Int_min_1[i] = minimum(sol_toplot_1[(end-burnin):end,2]); Int_min_2[i] = minimum(sol_toplot_2[(end-burnin):end,2]); Int_min_3[i] = minimum(sol_toplot_3[(end-burnin):end,2]);
+        # Store average densities
+        Pred_N_1[i] = mean(sol_toplot_1[(end-burnin):end,3]); Pred_N_2[i] = mean(sol_toplot_2[(end-burnin):end,3]); Pred_N_3[i] = mean(sol_toplot_3[(end-burnin):end,3]);
+        Int_N_1[i] = mean(sol_toplot_1[(end-burnin):end,2]); Int_N_2[i] = mean(sol_toplot_2[(end-burnin):end,2]); Int_N_3[i] = mean(sol_toplot_3[(end-burnin):end,2]);
+
+        # Calculate Trophic Level
+        TL_pre_1[i] = 1 + (p[7]*geomean(sol_toplot_1[(end-burnin):end,5])*Pred_N_1[i]*geomean(sol_toplot_1[(end-burnin):end,1]))/(1 + geomean(sol_toplot_1[(end-burnin):end,5])*p[12]*geomean(sol_toplot_1[(end-burnin):end,1])) /
+            ( p[7]*geomean(sol_toplot_1[(end-burnin):end,5])*Pred_N_1[i]*geomean(sol_toplot_1[(end-burnin):end,1])/(1 + geomean(sol_toplot_1[(end-burnin):end,5])*p[12]*geomean(sol_toplot_1[(end-burnin):end,1])) +
+            p[8]*geomean(sol_toplot_1[(end-burnin):end,6])*Pred_N_1[i]*Int_N_1[i]/(1 + geomean(sol_toplot_1[(end-burnin):end,6])*p[13]*Int_N_1[i]) ) +
+            2*(1 - (p[7]*geomean(sol_toplot_1[(end-burnin):end,5])*Pred_N_1[i]*geomean(sol_toplot_1[(end-burnin):end,1]))/(1 + geomean(sol_toplot_1[(end-burnin):end,5])*p[12]*geomean(sol_toplot_1[(end-burnin):end,1])) /
+                ( p[7]*geomean(sol_toplot_1[(end-burnin):end,5])*Pred_N_1[i]*geomean(sol_toplot_1[(end-burnin):end,1])/(1 + geomean(sol_toplot_1[(end-burnin):end,5])*p[12]*geomean(sol_toplot_1[(end-burnin):end,1])) +
+                p[8]*geomean(sol_toplot_1[(end-burnin):end,6])*Pred_N_1[i]*Int_N_1[i]/(1 + geomean(sol_toplot_1[(end-burnin):end,6])*p[13]*Int_N_1[i]) ))
+
+        TL_pre_2[i] = 1 + (p[7]*geomean(sol_toplot_2[(end-burnin):end,5])*Pred_N_2[i]*geomean(sol_toplot_2[(end-burnin):end,1]))/(1 + geomean(sol_toplot_2[(end-burnin):end,5])*p[12]*geomean(sol_toplot_2[(end-burnin):end,1])) /
+            ( p[7]*geomean(sol_toplot_2[(end-burnin):end,5])*Pred_N_2[i]*geomean(sol_toplot_2[(end-burnin):end,1])/(1 + geomean(sol_toplot_2[(end-burnin):end,5])*p[12]*geomean(sol_toplot_2[(end-burnin):end,1])) +
+            p[8]*geomean(sol_toplot_2[(end-burnin):end,6])*Pred_N_2[i]*Int_N_2[i]/(1 + geomean(sol_toplot_2[(end-burnin):end,6])*p[13]*Int_N_1[i]) ) +
+            2*(1 - (p[7]*geomean(sol_toplot_2[(end-burnin):end,5])*Pred_N_2[i]*geomean(sol_toplot_2[(end-burnin):end,1]))/(1 + geomean(sol_toplot_2[(end-burnin):end,5])*p[12]*geomean(sol_toplot_2[(end-burnin):end,1])) /
+                ( p[7]*geomean(sol_toplot_2[(end-burnin):end,5])*Pred_N_2[i]*geomean(sol_toplot_2[(end-burnin):end,1])/(1 + geomean(sol_toplot_2[(end-burnin):end,5])*p[12]*geomean(sol_toplot_2[(end-burnin):end,1])) +
+                p[8]*geomean(sol_toplot_2[(end-burnin):end,6])*Pred_N_2[i]*Int_N_2[i]/(1 + geomean(sol_toplot_2[(end-burnin):end,6])*p[13]*Int_N_2[i]) ))
+
+        TL_pre_3[i] = 1 + (p[7]*geomean(sol_toplot_3[(end-burnin):end,5])*Pred_N_3[i]*geomean(sol_toplot_3[(end-burnin):end,1]))/(1 + geomean(sol_toplot_3[(end-burnin):end,5])*p[12]*geomean(sol_toplot_3[(end-burnin):end,1])) /
+            ( p[7]*geomean(sol_toplot_3[(end-burnin):end,5])*Pred_N_3[i]*geomean(sol_toplot_3[(end-burnin):end,1])/(1 + geomean(sol_toplot_3[(end-burnin):end,5])*p[12]*geomean(sol_toplot_3[(end-burnin):end,1])) +
+            p[8]*geomean(sol_toplot_3[(end-burnin):end,6])*Pred_N_3[i]*Int_N_3[i]/(1 + geomean(sol_toplot_3[(end-burnin):end,6])*p[13]*Int_N_1[i]) ) +
+            2*(1 - (p[7]*geomean(sol_toplot_3[(end-burnin):end,5])*Pred_N_3[i]*geomean(sol_toplot_3[(end-burnin):end,1]))/(1 + geomean(sol_toplot_3[(end-burnin):end,5])*p[12]*geomean(sol_toplot_3[(end-burnin):end,1])) /
+                ( p[7]*geomean(sol_toplot_3[(end-burnin):end,5])*Pred_N_3[i]*geomean(sol_toplot_3[(end-burnin):end,1])/(1 + geomean(sol_toplot_3[(end-burnin):end,5])*p[12]*geomean(sol_toplot_3[(end-burnin):end,1])) +
+                p[8]*geomean(sol_toplot_3[(end-burnin):end,6])*Pred_N_3[i]*Int_N_3[i]/(1 + geomean(sol_toplot_3[(end-burnin):end,6])*p[13]*Int_N_1[i]) ))
+
+        #Calculate slope of TL vs N relationship
+        slope_pre_1[i] = (log(TL_pre_1[i])-log(2))/(log(Pred_N_1[i])-log(Int_N_1[i]))
+        slope_pre_2[i] = (log(TL_pre_2[i])-log(2))/(log(Pred_N_2[i])-log(Int_N_2[i]))
+        slope_pre_3[i] = (log(TL_pre_3[i])-log(2))/(log(Pred_N_3[i])-log(Int_N_3[i]))
+
+    end
+    println(j)
+    save(folder_names[1], "Pred_N_1",Pred_N_1,"Pred_N_2",Pred_N_2,"Pred_N_3",Pred_N_3,
+    "Pred_max_1",Pred_max_1,"Pred_max_2",Pred_max_2,"Pred_max_3",Pred_max_3,
+    "Pred_min_1",Pred_min_1,"Pred_min_2",Pred_min_2,"Pred_min_3",Pred_min_3,
+    "Int_N_1",Int_N_1,"Int_N_2",Int_N_2,"Int_N_3",Int_N_3,
+    "Int_max_1",Int_max_1,"Int_max_2",Int_max_2,"Int_max_3",Int_max_3,
+    "Int_min_1",Int_min_1,"Int_min_2",Int_min_2,"Int_min_3",Int_min_3,
+    "TL_pre_1", TL_pre_1, "TL_pre_2", TL_pre_2, "TL_pre_3", TL_pre_3,
+    "slope_pre_1",slope_pre_1,"slope_pre_2",slope_pre_2,"slope_pre_3",slope_pre_3,
+    )
+end
+
+## Needs these to plot though RCall
+data_1 = RObject(load(folder_names[1]));
+data_2 = RObject(load(folder_names[2]));
+data_3 = RObject(load(folder_names[3]));
+
+data_4 = RObject(load(folder_names[1]));
+data_5 = RObject(load(folder_names[2]));
+data_6 = RObject(load(folder_names[3]));
+
+
+R"
+#dev.new()
+
+#png(filename='/Users/jeanphi/Desktop/JP/Papers_in_progress/Justin_var_TL/plots/bifurcation_TO_0.5.png',
+#    units='in',width=7,height=7,pointsize=12,res=1200)
+
+#png(filename='/home/jp/bifurcation_TO_0.5.png',
+#    units='in',width=7,height=7,pointsize=12,res=1200)
+
+par(mfrow=c(3,2),mar=c(3, 2.2, 0.5, 0.5),oma=c(1.5,2,1,1))
+
+plot(1, axes=FALSE, col='white', ylab='',xlab='', main='')
+    #------------------------------------------------------
+    # Plot of tradeoff curves
+curve(0.8*exp(-0.01*(x-1)), 1, 2, ylim=c(0,1),axes=FALSE,xlab='',ylab='',main='',lwd=2)
+curve(0.8*exp(-0.2*(x-1)), 1, 2, add=TRUE,lwd=2)
+curve(0.8*exp(-1*(x-1)), 1, 2, add=TRUE,lwd=2)
+curve(0.8*exp(-2*(x-1)), 1, 2, add=TRUE,lwd=2)
+box(lwd=2, bty='l')
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,1,0.2), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+mtext(TeX('Attack rate $(a)'),1, line=2.2, cex=1.05)
+mtext(TeX('Conversion efficiency $(e)'),2,line=2.1, cex=1.05)
+    #------------------------------------------------------
+
+    # For tradeoff = 0.01-------------------------------------------
+plot($data_1$Pred_max_1 ~ $attack, axes=FALSE,pch=16,ylim=c(0,3),
+xlab='',ylab='',main='',cex=0.35, col=rgb(1,0,0))
+box(lwd=2, bty='l')
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,3,1), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+mtext(TeX('Attack rate $(a_{CR})'),1, line=2.2, cex=1.05)
+mtext('Abudance',2,line=2, cex=1.05)
+#abline(v=1.45)
+points($data_1$Pred_min_1 ~ $attack, pch=16, cex=0.35, col=rgb(1,0,0))
+points($data_1$Int_max_1 ~ $attack, pch=16,cex=0.35, col=rgb(0,0,0))
+points($data_1$Int_min_1 ~ $attack, pch=16, cex=0.35, col=rgb(0,0,0))
+
+    # For tradeoff = 0.2
+points($data_2$Pred_max_1 ~ $attack, pch=16,ylim=c(0,3),cex=0.35, col=rgb(1,0.5,0.5))
+#abline(v=1.45)
+points($data_2$Pred_min_1 ~ $attack, pch=16, cex=0.35, col=rgb(1,0.5,0.5))
+points($data_2$Int_max_1 ~ $attack, pch=16,cex=0.35, col=rgb(0.5,0.5,0.5))
+points($data_2$Int_min_1 ~ $attack, pch=16, cex=0.35, col=rgb(0.5,0.5,0.5))
+
+    # For tradeoff = 0.5
+points($data_3$Pred_max_1 ~ $attack, pch=16,ylim=c(0,3), xlab='a_C1R', cex=0.25, col=rgb(1,0.8,0.8))
+#abline(v=1.45)
+points($data_3$Pred_min_1 ~ $attack, pch=16, cex=0.35,col=rgb(1,0.8,0.8))
+points($data_3$Int_max_1 ~ $attack, pch=16,cex=0.35,col=rgb(0.8,0.8,0.8))
+points($data_3$Int_min_1 ~ $attack, pch=16, cex=0.35, col=rgb(0.8,0.8,0.8))
+
+    # For tradeoff = 0.01-------------------------------------------
+plot($data_1$Pred_max_2 ~ $attack, pch=16, ylim=c(0,3),axes=FALSE,
+xlab='',ylab='',main='',cex=0.35,col=rgb(1,0,0))
+box(lwd=2, bty='l')
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,3,1), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+mtext(TeX('Attack rate $(a_{TR})'),1, line=2.2, cex=1.05)
+#mtext('Abundance',2,line=1.75, cex=1.05)
+#abline(v=1.4)
+#abline(v=1.45)
+points($data_1$Pred_min_2 ~ $attack, pch=16, cex=0.35, col=rgb(1,0,0))
+points($data_1$Int_max_2 ~ $attack, pch=16, cex=0.35,col=rgb(0,0,0))
+points($data_1$Int_min_2 ~ $attack, pch=16, cex=0.35,col=rgb(0,0,0))
+
+    # For tradeoff = 0.2
+points($data_2$Pred_max_2 ~ $attack, pch=16, ylim=c(0,3), xlab='a_C2R', cex=0.25,col=rgb(1,0.5,0.5))
+#abline(v=1.4)
+#abline(v=1.45)
+points($data_2$Pred_min_2 ~ $attack, pch=16, cex=0.35, col=rgb(1,0.5,0.5))
+points($data_2$Int_max_2 ~ $attack, pch=16, cex=0.35,col=rgb(0.5,0.5,0.5))
+points($data_2$Int_min_2 ~ $attack, pch=16, cex=0.35,col=rgb(0.5,0.5,0.5))
+
+    # For tradeoff = 0.5
+points($data_3$Pred_max_2 ~ $attack, pch=16, ylim=c(0,3), xlab='a_C2R', cex=0.25,col=rgb(1,0.8,0.8))
+#abline(v=1.4)
+#abline(v=1.45)
+points($data_3$Pred_min_2 ~ $attack, pch=16, cex=0.35, col=rgb(1,0.8,0.8))
+points($data_3$Int_max_2 ~ $attack, pch=16, cex=0.35,col=rgb(0.8,0.8,0.8))
+points($data_3$Int_min_2 ~ $attack, pch=16, cex=0.35,col=rgb(0.8,0.8,0.8))
+
+    # For tradeoff = 0.01-------------------------------------------
+    ## Here I'm altering the order of the plot so that top pred
+    # curves stay on top of int pre curves!!
+plot($data_1$Int_max_3 ~ $attack, pch=16,cex=0.35,col=rgb(0,0,0),ylim=c(0,3),axes=FALSE,
+xlab='',ylab='',main='')
+box(lwd=2, bty='l')
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,3,1), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+mtext(TeX('Attack rate $(a_{TC})'),1, line=2.2, cex=1.05)
+mtext('Abundance',2,line=2.1, cex=1.05)
+points($data_1$Int_min_3 ~ $attack, pch=16,cex=0.35,col=rgb(0,0,0))
+    # The next two are tradeoff = 0.2 but got moved here for plotting purposes
+points($data_2$Int_max_3 ~ $attack, pch=16,cex=0.35,col=rgb(0.5,0.5,0.5))
+points($data_2$Int_min_3 ~ $attack, pch=16,cex=0.35,col=rgb(0.5,0.5,0.5))
+
+points($data_1$Pred_max_3 ~ $attack, pch=16, ylim=c(0,3),cex=0.35,col=rgb(1,0,0))
+points($data_1$Pred_min_3 ~ $attack, pch=16, cex=0.35,col=rgb(1,0,0))
+
+# For tradeoff = 0.2
+points($data_2$Pred_max_3 ~ $attack, pch=16,cex=0.35,col=rgb(1,0.5,0.5))
+points($data_2$Pred_min_3 ~ $attack, pch=16, cex=0.35,col=rgb(1,0.5,0.5))
+
+# For tradeoff = 0.5
+points($data_3$Int_max_3 ~ $attack, pch=16,cex=0.35,col=rgb(0.8,0.8,0.8))
+points($data_3$Int_min_3 ~ $attack, pch=16,cex=0.35,col=rgb(0.8,0.8,0.8))
+points($data_3$Pred_max_3 ~ $attack, pch=16, ylim=c(0,3), xlab='a_C1C2', cex=0.35,col=rgb(1,0.8,0.8))
+#abline(v=1.407)
+points($data_3$Pred_min_3 ~ $attack, pch=16, cex=0.35,col=rgb(1,0.8,0.8))
+#-------------------------------------------
+
+## For greater range of tradeoff values
+
+plot($data_1$Int_max_1 ~ $attack, pch=16, ylim=c(0,3),axes=FALSE,
+xlab='',ylab='',main='',cex=0.35,col=rgb(0,0,0))
+box(lwd=2, bty='l')
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,3,1), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+mtext(TeX('Attack rate $(a_{CR})'),1, line=2.2, cex=1.05)
+#mtext('Abundance',2,line=1.75, cex=1.05)
+#abline(v=1.4)
+#abline(v=1.45)
+points($data_1$Int_min_1 ~ $attack, pch=16, cex=0.35,col=rgb(0,0,0))
+
+    # For tradeoff = 0.2
+points($data_2$Int_max_1 ~ $attack, pch=16, cex=0.35,col=rgb(0.3,0.3,0.3))
+points($data_2$Int_min_1 ~ $attack, pch=16, cex=0.35,col=rgb(0.3,0.3,0.3))
+
+    # For tradeoff = 0.5
+points($data_3$Int_max_1 ~ $attack, pch=16, cex=0.35,col=rgb(0.5,0.5,0.5))
+points($data_3$Int_min_1 ~ $attack, pch=16, cex=0.35,col=rgb(0.5,0.5,0.5))
+
+    # For tradeoff = 1
+points($data_4$Int_max_1 ~ $attack, pch=16, cex=0.35,col=rgb(0.6,0.6,0.6))
+points($data_4$Int_min_1 ~ $attack, pch=16, cex=0.35,col=rgb(0.6,0.6,0.6))
+    # For tradeoff = 1.5
+points($data_5$Int_max_1 ~ $attack, pch=16, cex=0.35,col=rgb(0.7,0.7,0.7))
+points($data_5$Int_min_1 ~ $attack, pch=16, cex=0.35,col=rgb(0.7,0.7,0.7))
+    # For tradeoff = 2
+points($data_6$Int_max_1 ~ $attack, pch=16, cex=0.35,col=rgb(0.8,0.8,0.8))
+points($data_6$Int_min_1 ~ $attack, pch=16, cex=0.35,col=rgb(0.8,0.8,0.8))
+
+
+#-------------------------------------------
+#plot($data_1$TL_pre_1 ~ $attack, pch=16, ylim=c(2,3), cex=0.25,col=rgb(0,0,0))
+#points($data_2$TL_pre_1 ~ $attack, pch=16, ylim=c(2,3), cex=0.25,col=rgb(0.5,0.5,0.5))
+#points($data_3$TL_pre_1 ~ $attack, pch=16, ylim=c(2,3), cex=0.25,col=rgb(0.8,0.8,0.8))
+
+#plot($data_1$TL_pre_2 ~ $attack, pch=16, ylim=c(2,3), cex=0.25,col=rgb(0,0,0))
+#points($data_2$TL_pre_2 ~ $attack, pch=16, ylim=c(2,3), cex=0.25,col=rgb(0.5,0.5,0.5))
+#points($data_3$TL_pre_2 ~ $attack, pch=16, ylim=c(2,3), cex=0.25,col=rgb(0.8,0.8,0.8))
+
+#plot($data_1$TL_pre_3 ~ $attack, pch=16, ylim=c(2,3), cex=0.25,col=rgb(0,0,0))
+#points($data_2$TL_pre_3 ~ $attack, pch=16, ylim=c(2,3), cex=0.25,col=rgb(0.5,0.5,0.5))
+#points($data_3$TL_pre_3 ~ $attack, pch=16, ylim=c(2,3), cex=0.25,col=rgb(0.8,0.8,0.8))
+
+#plot($data_1$slope_pre_1 ~ $attack, pch=16, ylim=c(-0.3,0), cex=0.25,col=rgb(0,0,0))
+#points($data_2$slope_pre_1 ~ $attack, pch=16, ylim=c(-0.3,0), cex=0.25,col=rgb(0.5,0.5,0.5))
+#points($data_3$slope_pre_1 ~ $attack, pch=16, ylim=c(-0.3,0), cex=0.25,col=rgb(0.8,0.8,0.8))
+
+#plot($data_1$slope_pre_2 ~ $attack, pch=16, ylim=c(-0.3,0), cex=0.25, col=rgb(0,0,0))
+#points($data_2$slope_pre_2 ~ $attack, pch=16, ylim=c(-0.3,0), cex=0.25, col=rgb(0.5,0.5,0.5))
+#points($data_3$slope_pre_2 ~ $attack, pch=16, ylim=c(-0.3,0), cex=0.25, col=rgb(0.8,0.8,0.8))
+
+#plot($data_1$slope_pre_3 ~ $attack, pch=16, ylim=c(-0.3,0), cex=0.25, col=rgb(0,0,0))
+#points($data_2$slope_pre_3 ~ $attack, pch=16, ylim=c(-0.3,0), cex=0.25, col=rgb(0.5,0.5,0.5))
+#points($data_3$slope_pre_3 ~ $attack, pch=16, ylim=c(-0.3,0), cex=0.25, col=rgb(0.8,0.8,0.8))
+
+#dev.off()
+"
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+## 2) For TRADEOFF VALUES (FIG 2 of the paper)
+## Eco dynamics, NO Evolution
+tradeoff = collect(linspace(0,2,400));
+Pred_max_1 = SharedArray{Float64}(400);Pred_max_2 = SharedArray{Float64}(400);Pred_max_3 = SharedArray{Float64}(400);
+Pred_min_1 = SharedArray{Float64}(400);Pred_min_2 = SharedArray{Float64}(400);Pred_min_3 = SharedArray{Float64}(400);
+Int_max_1 = SharedArray{Float64}(400);Int_max_2 = SharedArray{Float64}(400);Int_max_3 = SharedArray{Float64}(400);
+Int_min_1 = SharedArray{Float64}(400);Int_min_2 = SharedArray{Float64}(400);Int_min_3 = SharedArray{Float64}(400);
+attack_N_1 = SharedArray{Float64}(400);attack_N_2 = SharedArray{Float64}(400);attack_N_3 = SharedArray{Float64}(400);
+attack_N_12 = SharedArray{Float64}(400);attack_N_22 = SharedArray{Float64}(400);attack_N_32 = SharedArray{Float64}(400);
+attack_N_13 = SharedArray{Float64}(400);attack_N_23 = SharedArray{Float64}(400);attack_N_33 = SharedArray{Float64}(400);
+attack_max_1 = SharedArray{Float64}(400);attack_max_2 = SharedArray{Float64}(400);attack_max_3 = SharedArray{Float64}(400);
+attack_min_1 = SharedArray{Float64}(400);attack_min_2 = SharedArray{Float64}(400);attack_min_3 = SharedArray{Float64}(400);
+
+Pred_N_1 = SharedArray{Float64}(400);Pred_N_2 = SharedArray{Float64}(400);Pred_N_3 = SharedArray{Float64}(400);
+Int_N_1 = SharedArray{Float64}(400);Int_N_2 = SharedArray{Float64}(400);Int_N_3 = SharedArray{Float64}(400);
+Base_N_1 = SharedArray{Float64}(400);Base_N_2 = SharedArray{Float64}(400);Base_N_3 = SharedArray{Float64}(400);
+
+TL_pre_1 = SharedArray{Float64}(400);TL_pre_2 = SharedArray{Float64}(400);TL_pre_3 = SharedArray{Float64}(400);
+slope_pre_1 = SharedArray{Float64}(400);slope_pre_2 = SharedArray{Float64}(400);slope_pre_3 = SharedArray{Float64}(400);
+
+tspan = (0.0,4000);
+burnin = 8000;
+
+#tradeoff = (1,1.5,2);
+#tradeoff = 0.1
+folder_names = ["/Users/jeangibert/Desktop/JP/Papers_in_review_submitted/Justin_var_TL/tradeoff_1.jld"]
+
+
+# Needs to run trice for each value of tradeoff = 0.1, 0.2, 0.5
+
+@time @sync @parallel for i in 1:400
+    #[1=r,2=K,3=hvar_RC1,4=hvar_RC2,5=hvar_C1C2,6=e_RC1,7=e_RC2
+    #            8=e_C1C2,9=d_C1,10=d_C2,11=h_RC1, 12=h_RC2, 13=h_C1C2
+    #               14=gamma_C1R, 15=gamma_C2R, 16=gamma_C1C2, 17= a_init]
+    p_1 = [1.5,5,0.1,0.1,0.1,0.8,0.2,0.8,0.8,0.8,0.5,0.5,0.5,tradeoff[i],1,1,1];
+    p_2 = [1.5,5,0.1,0.1,0.1,0.8,0.2,0.8,0.8,0.8,0.5,0.5,0.5,1,tradeoff[i],1,1];
+    p_3 = [1.5,5,0.1,0.1,0.1,0.8,0.2,0.8,0.8,0.8,0.5,0.5,0.5,1,1,tradeoff[i],1];
+    #p_3 = [1.5,5,0.1,0.1,0.1,0.8,0.2,0.8,0.8,0.8,0.5,0.5,0.5,1,tradeoff[i],tradeoff[i],1];
+    u = [2.0;1;1;1;1;1]; # [R,C1,C2,a_RC1,a_RC2,a_C1C2
+    prob_1 = ODEProblem(parameterized_LV_II_evol_TO,u,tspan,p_1);
+    prob_2 = ODEProblem(parameterized_LV_II_evol_TO,u,tspan,p_2);
+    prob_3 = ODEProblem(parameterized_LV_II_evol_TO,u,tspan,p_3);
+    sol_1 = solve(prob_1, adaptive=false,dt=0.075)
+    sol_2 = solve(prob_2, adaptive=false,dt=0.075)
+    sol_3 = solve(prob_3, adaptive=false,dt=0.075)
+    sol_toplot_1 = hcat(sol_1.u...)'
+    sol_toplot_2 = hcat(sol_2.u...)'
+    sol_toplot_3 = hcat(sol_3.u...)'
+
+    # Store mins and max
+    Pred_max_1[i] = maximum(sol_toplot_1[(end-burnin):end,3]); Pred_max_2[i] = maximum(sol_toplot_2[(end-burnin):end,3]); Pred_max_3[i] = maximum(sol_toplot_3[(end-burnin):end,3]);
+    Pred_min_1[i] = minimum(sol_toplot_1[(end-burnin):end,3]);Pred_min_2[i] = minimum(sol_toplot_2[(end-burnin):end,3]);Pred_min_3[i] = minimum(sol_toplot_3[(end-burnin):end,3]);
+    Int_max_1[i] = maximum(sol_toplot_1[(end-burnin):end,2]); Int_max_2[i] = maximum(sol_toplot_2[(end-burnin):end,2]); Int_max_3[i] = maximum(sol_toplot_3[(end-burnin):end,2]);
+    Int_min_1[i] = minimum(sol_toplot_1[(end-burnin):end,2]); Int_min_2[i] = minimum(sol_toplot_2[(end-burnin):end,2]); Int_min_3[i] = minimum(sol_toplot_3[(end-burnin):end,2]);
+    # Store average densities
+    Pred_N_1[i] = geomean(sol_toplot_1[(end-burnin):end,3]); Pred_N_2[i] = geomean(sol_toplot_2[(end-burnin):end,3]); Pred_N_3[i] = geomean(sol_toplot_3[(end-burnin):end,3]);
+    Int_N_1[i] = geomean(sol_toplot_1[(end-burnin):end,2]); Int_N_2[i] = geomean(sol_toplot_2[(end-burnin):end,2]); Int_N_3[i] = geomean(sol_toplot_3[(end-burnin):end,2]);
+    Base_N_1[i] = geomean(sol_toplot_1[(end-burnin):end,1]); Base_N_2[i] = geomean(sol_toplot_2[(end-burnin):end,1]); Base_N_3[i] = geomean(sol_toplot_3[(end-burnin):end,1]);
+    # Store trait values
+    attack_max_1[i]=maximum(sol_toplot_1[(end-burnin):end,4]);attack_min_1[i]=minimum(sol_toplot_1[(end-burnin):end,4]);
+    attack_max_2[i]=maximum(sol_toplot_2[(end-burnin):end,5]);attack_min_2[i]=minimum(sol_toplot_2[(end-burnin):end,5]);
+    attack_max_3[i]=maximum(sol_toplot_3[(end-burnin):end,6]);attack_min_3[i]=minimum(sol_toplot_3[(end-burnin):end,6]);
+    attack_N_1[i]=geomean(sol_toplot_1[(end-burnin):end,4]);attack_N_2[i]=geomean(sol_toplot_2[(end-burnin):end,4]);attack_N_3[i]=geomean(sol_toplot_3[(end-burnin):end,4]);
+    attack_N_12[i]=geomean(sol_toplot_1[(end-burnin):end,5]);attack_N_22[i]=geomean(sol_toplot_2[(end-burnin):end,5]);attack_N_32[i]=geomean(sol_toplot_3[(end-burnin):end,5]);
+    attack_N_13[i]=geomean(sol_toplot_1[(end-burnin):end,6]);attack_N_23[i]=geomean(sol_toplot_2[(end-burnin):end,6]);attack_N_33[i]=geomean(sol_toplot_3[(end-burnin):end,6]);
+    # Calculate Trophic Level
+    #TL_pre_1[i] = 1 + (p_1[7]*geomean(sol_toplot_1[(end-burnin):end,5])*Pred_N_1[i]*geomean(sol_toplot_1[(end-burnin):end,1]))/(1 + geomean(sol_toplot_1[(end-burnin):end,5])*p_1[12]*geomean(sol_toplot_1[(end-burnin):end,1])) /
+    #    ( p_1[7]*geomean(sol_toplot_1[(end-burnin):end,5])*Pred_N_1[i]*geomean(sol_toplot_1[(end-burnin):end,1])/(1 + geomean(sol_toplot_1[(end-burnin):end,5])*p_1[12]*geomean(sol_toplot_1[(end-burnin):end,1])) +
+    #    p_1[8]*geomean(sol_toplot_1[(end-burnin):end,6])*Pred_N_1[i]*Int_N_1[i]/(1 + geomean(sol_toplot_1[(end-burnin):end,6])*p_1[13]*Int_N_1[i]) ) +
+    #    2*(1 - (p_1[7]*geomean(sol_toplot_1[(end-burnin):end,5])*Pred_N_1[i]*geomean(sol_toplot_1[(end-burnin):end,1]))/(1 + geomean(sol_toplot_1[(end-burnin):end,5])*p_1[12]*geomean(sol_toplot_1[(end-burnin):end,1])) /
+    #        ( p_1[7]*geomean(sol_toplot_1[(end-burnin):end,5])*Pred_N_1[i]*geomean(sol_toplot_1[(end-burnin):end,1])/(1 + geomean(sol_toplot_1[(end-burnin):end,5])*p_1[12]*geomean(sol_toplot_1[(end-burnin):end,1])) +
+    #        p_1[8]*geomean(sol_toplot_1[(end-burnin):end,6])*Pred_N_1[i]*Int_N_1[i]/(1 + geomean(sol_toplot_1[(end-burnin):end,6])*p_1[13]*Int_N_1[i]) ))
+
+    #TL_pre_2[i] = 1 + (p_2[7]*geomean(sol_toplot_2[(end-burnin):end,5])*Pred_N_2[i]*geomean(sol_toplot_2[(end-burnin):end,1]))/(1 + geomean(sol_toplot_2[(end-burnin):end,5])*p_2[12]*geomean(sol_toplot_2[(end-burnin):end,1])) /
+    #    ( p_2[7]*geomean(sol_toplot_2[(end-burnin):end,5])*Pred_N_2[i]*geomean(sol_toplot_2[(end-burnin):end,1])/(1 + geomean(sol_toplot_2[(end-burnin):end,5])*p_2[12]*geomean(sol_toplot_2[(end-burnin):end,1])) +
+    #    p_2[8]*geomean(sol_toplot_2[(end-burnin):end,6])*Pred_N_2[i]*Int_N_2[i]/(1 + geomean(sol_toplot_2[(end-burnin):end,6])*p_2[13]*Int_N_1[i]) ) +
+    #    2*(1 - (p_2[7]*geomean(sol_toplot_2[(end-burnin):end,5])*Pred_N_2[i]*geomean(sol_toplot_2[(end-burnin):end,1]))/(1 + geomean(sol_toplot_2[(end-burnin):end,5])*p_2[12]*geomean(sol_toplot_2[(end-burnin):end,1])) /
+    #        ( p_2[7]*geomean(sol_toplot_2[(end-burnin):end,5])*Pred_N_2[i]*geomean(sol_toplot_2[(end-burnin):end,1])/(1 + geomean(sol_toplot_2[(end-burnin):end,5])*p_2[12]*geomean(sol_toplot_2[(end-burnin):end,1])) +
+    #        p_2[8]*geomean(sol_toplot_2[(end-burnin):end,6])*Pred_N_2[i]*Int_N_2[i]/(1 + geomean(sol_toplot_2[(end-burnin):end,6])*p_2[13]*Int_N_2[i]) ))
+
+    #TL_pre_3[i] = 1 + (p_3[7]*geomean(sol_toplot_3[(end-burnin):end,1]))/(1 + geomean(sol_toplot_3[(end-burnin):end,5])*p_3[12]*geomean(sol_toplot_3[(end-burnin):end,1])) /
+    #    ( p_3[7]*geomean(sol_toplot_3[(end-burnin):end,5])*Pred_N_3[i]*geomean(sol_toplot_3[(end-burnin):end,1])/(1 + geomean(sol_toplot_3[(end-burnin):end,5])*p_3[12]*geomean(sol_toplot_3[(end-burnin):end,1])) +
+    #    p_3[8]*geomean(sol_toplot_3[(end-burnin):end,6])*Pred_N_3[i]*Int_N_3[i]/(1 + geomean(sol_toplot_3[(end-burnin):end,6])*p_3[13]*Int_N_1[i]) ) +
+    #    2*(1 - (p_3[7]*geomean(sol_toplot_3[(end-burnin):end,5])*Pred_N_3[i]*geomean(sol_toplot_3[(end-burnin):end,1]))/(1 + geomean(sol_toplot_3[(end-burnin):end,5])*p_3[12]*geomean(sol_toplot_3[(end-burnin):end,1])) /
+    #        ( p_3[7]*geomean(sol_toplot_3[(end-burnin):end,5])*Pred_N_3[i]*geomean(sol_toplot_3[(end-burnin):end,1])/(1 + geomean(sol_toplot_3[(end-burnin):end,5])*p_3[12]*geomean(sol_toplot_3[(end-burnin):end,1])) +
+    #        p_3[8]*geomean(sol_toplot_3[(end-burnin):end,6])*Pred_N_3[i]*Int_N_3[i]/(1 + geomean(sol_toplot_3[(end-burnin):end,6])*p_3[13]*Int_N_1[i]) ))
+
+    #Calculate slope of TL vs N relationship
+    #slope_pre_1[i] = (log(TL_pre_1[i])-log(2))/(log(Pred_N_1[i])-log(Int_N_1[i]))
+    #slope_pre_2[i] = (log(TL_pre_2[i])-log(2))/(log(Pred_N_2[i])-log(Int_N_2[i]))
+    #slope_pre_3[i] = (log(TL_pre_3[i])-log(2))/(log(Pred_N_3[i])-log(Int_N_3[i]))
+
+end
+
+save(folder_names[1], "Pred_N_1",Pred_N_1,"Pred_N_2",Pred_N_2,"Pred_N_3",Pred_N_3,
+"Pred_max_1",Pred_max_1,"Pred_max_2",Pred_max_2,"Pred_max_3",Pred_max_3,
+"Pred_min_1",Pred_min_1,"Pred_min_2",Pred_min_2,"Pred_min_3",Pred_min_3,
+"Int_N_1",Int_N_1,"Int_N_2",Int_N_2,"Int_N_3",Int_N_3,
+"Int_max_1",Int_max_1,"Int_max_2",Int_max_2,"Int_max_3",Int_max_3,
+"Int_min_1",Int_min_1,"Int_min_2",Int_min_2,"Int_min_3",Int_min_3,
+"Base_N_1",Base_N_1,"Base_N_2",Base_N_2,"Base_N_3",Base_N_3,
+"TL_pre_1", TL_pre_1, "TL_pre_2", TL_pre_2, "TL_pre_3", TL_pre_3,
+"slope_pre_1",slope_pre_1,"slope_pre_2",slope_pre_2,"slope_pre_3",slope_pre_3,
+"attack_N_1",attack_N_1,"attack_N_2",attack_N_2,"attack_N_3",attack_N_3,
+"attack_N_12",attack_N_12,"attack_N_22",attack_N_22,"attack_N_32",attack_N_32,
+"attack_N_13",attack_N_13,"attack_N_23",attack_N_23,"attack_N_33",attack_N_33,
+"attack_max_1",attack_max_1,"attack_max_2",attack_max_2,"attack_max_3",attack_max_3,
+"attack_min_1",attack_min_1,"attack_min_2",attack_min_2,"attack_min_3",attack_min_3
+)
+
+data_1 = RObject(load(folder_names[1]));
+
+R"
+toEigen <- data.frame(PredN1 = $data_1$Pred_N_1,PredN2 = $data_1$Pred_N_2, PredN3 = $data_1$Pred_N_3,
+                IntN1 = $data_1$Int_N_1,IntN2 = $data_1$Int_N_2, IntN3 = $data_1$Int_N_3,
+                BaseN1 = $data_1$Base_N_1,BaseN2 = $data_1$Base_N_2, BaseN3 = $data_1$Base_N_3,
+                attackN1 = $data_1$attack_N_1,attackN12 = $data_1$attack_N_12, attackN13 = $data_1$attack_N_13,
+                attackN2 = $data_1$attack_N_2,attackN22 = $data_1$attack_N_22, attackN23 = $data_1$attack_N_23,
+                attackN3 = $data_1$attack_N_3,attackN32 = $data_1$attack_N_32, attackN33 = $data_1$attack_N_33,
+                tradeoff = $tradeoff)
+
+write.csv(toEigen, '/Users/jeanphi/Desktop/JP/Papers_in_progress/Justin_var_TL/toEigen.csv')
+"
+
+R"
+dev.new(width=9, height=5)
+#png(filename='/Users/jeanphi/Desktop/JP/Papers_in_progress/Justin_var_TL/plots/bifurcation_TO_0.5.png',
+#    units='in',width=7,height=7,pointsize=12,res=1200)
+
+#png(filename='/home/jp/bifurcation_TO_0.5.png',
+#    units='in',width=7,height=7,pointsize=12,res=1200)
+
+par(mfrow=c(2,3),mar=c(2, 2.4, 0.5, 0.5),oma=c(1.5,2,1,1))
+
+#plot(1, axes=FALSE, col='white', ylab='',xlab='', main='')
+
+    # For tradeoff = 0.01-------------------------------------------
+plot($data_1$Pred_max_1 ~ $tradeoff, axes=FALSE,pch=16,ylim=c(0,6),
+xlab='',ylab='',main='',cex=0.35, col=rgb(1,0,0))
+box(lwd=2, bty='l')
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,6,1), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+#mtext(TeX('Consumer cost ($\\gamma_{RC}$)'),1, line=2.2, cex=1.05)
+mtext('Abudance',2,line=2, cex=1.05)
+#abline(v=1.45)
+points($data_1$Pred_min_1 ~ $tradeoff, pch=16, cex=0.35, col=rgb(1,0,0))
+points($data_1$Int_max_1 ~ $tradeoff, pch=16,cex=0.35, col=rgb(0,0,0))
+points($data_1$Int_min_1 ~ $tradeoff, pch=16, cex=0.35, col=rgb(0,0,0))
+
+    # For tradeoff = 0.01-------------------------------------------
+plot($data_1$Pred_max_2 ~ $tradeoff, pch=16, ylim=c(0,6),axes=FALSE,
+xlab='',ylab='',main='',cex=0.35,col=rgb(1,0,0))
+box(lwd=2, bty='l')
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,6,1), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+#mtext(TeX('Top predator cost ($\\gamma_{RT}$)'),1, line=2.2, cex=1.05)
+#mtext('Abundance',2,line=1.75, cex=1.05)
+#abline(v=1.4)
+#abline(v=1.45)
+points($data_1$Pred_min_2 ~ $tradeoff, pch=16, cex=0.35, col=rgb(1,0,0))
+points($data_1$Int_max_2 ~ $tradeoff, pch=16, cex=0.35,col=rgb(0,0,0))
+points($data_1$Int_min_2 ~ $tradeoff, pch=16, cex=0.35,col=rgb(0,0,0))
+
+    # For tradeoff = 0.01-------------------------------------------
+    ## Here I'm altering the order of the plot so that top pred
+    # curves stay on top of int pre curves!!
+plot($data_1$Int_max_3 ~ $tradeoff, pch=16,cex=0.35,col=rgb(0,0,0),ylim=c(0,6),axes=FALSE,
+xlab='',ylab='',main='')
+box(lwd=2, bty='l')
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,6,1), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+#mtext(TeX('Top predator cost ($\\gamma_{CT}$)'),1, line=2.4, cex=1.05)
+#mtext('Abundance',2,line=2.1, cex=1.05)
+points($data_1$Int_min_3 ~ $tradeoff, pch=16,cex=0.35,col=rgb(0,0,0))
+points($data_1$Pred_max_3 ~ $tradeoff, pch=16, ylim=c(0,3),cex=0.35,col=rgb(1,0,0))
+points($data_1$Pred_min_3 ~ $tradeoff, pch=16, cex=0.35,col=rgb(1,0,0))
+
+# For attackrates = 0.01-------------------------------------------
+plot($data_1$attack_max_1 ~ $tradeoff, axes=FALSE,pch=16,ylim=c(0,6),
+xlab='',ylab='',main='',cex=0.35, col=rgb(0,0,0))
+box(lwd=2, bty='l')
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,6,1), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+mtext(TeX('Consumer cost ($\\gamma_{RC}$)'),1, line=2.4, cex=1.05)
+mtext(TeX('Attack rate ($\\alpha_{RC}$)'),2,line=2, cex=1.05)
+#abline(v=1.45)
+points($data_1$attack_min_1 ~ $tradeoff, pch=16, cex=0.35, col=rgb(0,0,0))
+
+plot($data_1$attack_max_2 ~ $tradeoff, axes=FALSE,pch=16,ylim=c(0,6),
+xlab='',ylab='',main='',cex=0.35, col=rgb(1,0,0))
+box(lwd=2, bty='l')
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,6,1), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+mtext(TeX('Top predator cost ($\\gamma_{RT}$)'),1, line=2.5, cex=1.05)
+mtext(TeX('Attack rate ($\\alpha_{RT}$)'),2,line=1.5, cex=1.05)
+#abline(v=1.45)
+points($data_1$attack_min_2 ~ $tradeoff, pch=16, cex=0.35, col=rgb(1,0,0))
+
+plot($data_1$attack_max_3 ~ $tradeoff, axes=FALSE,pch=16,ylim=c(0,6),
+xlab='',ylab='',main='',cex=0.35, col=rgb(1,0,0))
+box(lwd=2, bty='l')
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,6,1), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+mtext(TeX('Top predator cost ($\\gamma_{CT}$)'),1, line=2.5, cex=1.05)
+mtext(TeX('Attack rate ($\\alpha_{CT}$)'),2,line=1.5, cex=1.05)
+#abline(v=1.45)
+points($data_1$attack_min_3 ~ $tradeoff, pch=16, cex=0.35, col=rgb(1,0,0))
+
+#dev.off()
+"
+
+###-------------------------------------------------------------------------------
+## HEAT MAPS FOR DIFFERENT levels of the TRADEOFF (FIGS 3 and 4)
+###-------------------------------------------------------------------------------
+
+## Runs model but plots further down. This is needed to plot
+tradeoff1=collect(linspace(0,2,300));
+tradeoff2=collect(linspace(0,2,300));
+combin_N = reshape([[x,y] for x in tradeoff1, y in tradeoff2],90000,1);
+persist_N1 = SharedArray{Float64}(90000);persist_N12 = SharedArray{Float64}(90000);persist_N13 = SharedArray{Float64}(90000);
+persist_N2 = SharedArray{Float64}(90000);persist_N22 = SharedArray{Float64}(90000);
+persist_N3 = SharedArray{Float64}(90000);persist_N32 = SharedArray{Float64}(90000);
+TL_1 = SharedArray{Float64}(90000);
+TL_2 = SharedArray{Float64}(90000);
+TL_3 = SharedArray{Float64}(90000);
+slope_1 = SharedArray{Float64}(90000);
+slope_2 = SharedArray{Float64}(90000);
+slope_3 = SharedArray{Float64}(90000);
+u0 = [2.0;1;1;1;1;1];
+tspan = (0.0,4000);
+burnin = 10000;
+
+#@showprogress
+@time @sync @parallel for i in 1:90000
+    #[1=r,2=K,3=hvar_RC1,4=hvar_RC2,5=hvar_C1C2,6=e_RC1,7=e_RC2
+    #            8=e_C1C2,9=d_C1,10=d_C2,11=h_RC1, 12=h_RC2, 13=h_C1C2
+    #               14=gamma_C1R, 15=gamma_C2R, 16=gamma_C1C2, 17= a_init]
+        # INIT [1.5,5,0.1,0.1,0.1,0.8,0.2,0.8,0.8,0.8,0.5,0.5,0.5,0.1,0.1,0.1,1]
+    p_new_N1 = [1.5,5,0.1,0.1,0.1,0.8,0.2,0.8,0.8,0.8,0.5,0.5,0.5,combin_N[i][1],combin_N[i][2],combin_N[i][2],1];
+    #p_new_N2 = [1.5,5,0.25,0.25,0.25,0.8,0.2,0.8,0.8,0.8,0.5,0.5,0.5,combin_N[i][1],combin_N[i][2],combin_N[i][2],1];
+    #p_new_N3 = [1.5,5,0.25,0.25,0.25,0.8,0.2,0.8,0.8,0.8,0.5,0.5,0.5,combin_N[i][1],combin_N[i][2],combin_N[i][2],1];
+    u0 = [2.0;1;1;1;1;1];
+    # Define then run ODEs
+    #pf_evol_N1 = ParameterizedFunction(parameterized_LV_II_evol_TO,p_new_N1)
+    #pf_evol_N2 = ParameterizedFunction(parameterized_LV_II_evol_TO,p_new_N2)
+    #pf_evol_N3 = ParameterizedFunction(parameterized_LV_II_evol_TO,p_new_N3)
+    prob_N1 = ODEProblem(parameterized_LV_II_evol_TO,u0,tspan,p_new_N1)
+    #prob_N2 = ODEProblem(pf_evol_N2,u0,tspan)
+    #prob_N3 = ODEProblem(pf_evol_N3,u0,tspan)
+    sol_N1 = solve(prob_N1, adaptive=false,dt=0.075) # sol_N1 = solve(prob_N1, reltol=1e-8,abstol=1e-8)
+    #sol_N2 = solve(prob_N2, adaptive=false,dt=0.075)
+    #sol_N3 = solve(prob_N3, adaptive=false,dt=0.075)
+        # We ask whether every species is alive in the last time step of "sol"
+    sol_plot_N1 = hcat(sol_N1.u...)'
+    #sol_plot_N2 = hcat(sol_N2.u...)'
+    #sol_plot_N3 = hcat(sol_N3.u...)'
+
+        # Calculate geom mean of density time series and trait values
+    persist_N1[i]= geomean(sol_plot_N1[(end-burnin):end,3])
+    #persist_N2[i]= geomean(sol_plot_N2[(end-burnin):end,3])
+    #persist_N3[i]= geomean(sol_plot_N3[(end-burnin):end,3])
+    persist_N12[i]=geomean(sol_plot_N1[(end-burnin):end,2])
+    #persist_N22[i]=geomean(sol_plot_N2[(end-burnin):end,2])
+    #persist_N32[i]=geomean(sol_plot_N3[(end-burnin):end,2])
+    persist_N13[i]=geomean(sol_plot_N1[(end-burnin):end,1])
+
+        # Calculate Tls for top predator
+    TL_1[i] = 1 + ( p_new_N1[7]*geomean(sol_plot_N1[(end-burnin):end,5])*geomean(sol_plot_N1[(end-burnin):end,1])*geomean(sol_plot_N1[(end-burnin):end,3])/(1+geomean(sol_plot_N1[(end-burnin):end,5])*p_new_N1[12]*geomean(sol_plot_N1[(end-burnin):end,1])) )/
+        ( p_new_N1[7]*geomean(sol_plot_N1[(end-burnin):end,5])*geomean(sol_plot_N1[(end-burnin):end,1])*geomean(sol_plot_N1[(end-burnin):end,3])/(1+geomean(sol_plot_N1[(end-burnin):end,5])*p_new_N1[12]*geomean(sol_plot_N1[(end-burnin):end,1])) +
+        p_new_N1[8]*geomean(sol_plot_N1[(end-burnin):end,6])*geomean(sol_plot_N1[(end-burnin):end,2])*geomean(sol_plot_N1[(end-burnin):end,3])/(1+geomean(sol_plot_N1[(end-burnin):end,6])*p_new_N1[13]*geomean(sol_plot_N1[(end-burnin):end,2])) ) +
+        2*( 1 - ( p_new_N1[7]*geomean(sol_plot_N1[(end-burnin):end,5])*geomean(sol_plot_N1[(end-burnin):end,1])*geomean(sol_plot_N1[(end-burnin):end,3])/(1+geomean(sol_plot_N1[(end-burnin):end,5])*p_new_N1[12]*geomean(sol_plot_N1[(end-burnin):end,1])) )/
+            ( p_new_N1[7]*geomean(sol_plot_N1[(end-burnin):end,5])*geomean(sol_plot_N1[(end-burnin):end,1])*geomean(sol_plot_N1[(end-burnin):end,3])/(1+geomean(sol_plot_N1[(end-burnin):end,5])*p_new_N1[12]*geomean(sol_plot_N1[(end-burnin):end,1])) +
+            p_new_N1[8]*geomean(sol_plot_N1[(end-burnin):end,6])*geomean(sol_plot_N1[(end-burnin):end,2])*geomean(sol_plot_N1[(end-burnin):end,3])/(1+geomean(sol_plot_N1[(end-burnin):end,6])*p_new_N1[13]*geomean(sol_plot_N1[(end-burnin):end,2])) ))
+    #TL_2[i] = 1 + ( p_new_N2[7]*geomean(sol_plot_N2[(end-burnin):end,5])*geomean(sol_plot_N2[(end-burnin):end,1])*geomean(sol_plot_N2[(end-burnin):end,3])/(1+geomean(sol_plot_N2[(end-burnin):end,5])*p_new_N2[12]*geomean(sol_plot_N2[(end-burnin):end,1])) )/
+    #    ( p_new_N2[7]*geomean(sol_plot_N2[(end-burnin):end,5])*geomean(sol_plot_N2[(end-burnin):end,1])*geomean(sol_plot_N2[(end-burnin):end,3])/(1+geomean(sol_plot_N2[(end-burnin):end,5])*p_new_N2[12]*geomean(sol_plot_N2[(end-burnin):end,1])) +
+    #    p_new_N2[8]*geomean(sol_plot_N2[(end-burnin):end,6])*geomean(sol_plot_N2[(end-burnin):end,2])*geomean(sol_plot_N2[(end-burnin):end,3])/(1+geomean(sol_plot_N2[(end-burnin):end,6])*p_new_N2[13]*geomean(sol_plot_N2[(end-burnin):end,2])) ) +
+    #    2*( 1 - ( p_new_N2[7]*geomean(sol_plot_N2[(end-burnin):end,5])*geomean(sol_plot_N2[(end-burnin):end,1])*geomean(sol_plot_N2[(end-burnin):end,3])/(1+geomean(sol_plot_N2[(end-burnin):end,5])*p_new_N2[12]*geomean(sol_plot_N2[(end-burnin):end,1])) )/
+    #        ( p_new_N2[7]*geomean(sol_plot_N2[(end-burnin):end,5])*geomean(sol_plot_N2[(end-burnin):end,1])*geomean(sol_plot_N2[(end-burnin):end,3])/(1+geomean(sol_plot_N2[(end-burnin):end,5])*p_new_N2[12]*geomean(sol_plot_N2[(end-burnin):end,1])) +
+    #        p_new_N2[8]*geomean(sol_plot_N2[(end-burnin):end,6])*geomean(sol_plot_N2[(end-burnin):end,2])*geomean(sol_plot_N2[(end-burnin):end,3])/(1+geomean(sol_plot_N2[(end-burnin):end,6])*p_new_N2[13]*geomean(sol_plot_N2[(end-burnin):end,2])) ))
+    #TL_3[i] = 1 + ( p_new_N3[7]*geomean(sol_plot_N3[(end-burnin):end,5])*geomean(sol_plot_N3[(end-burnin):end,1])*geomean(sol_plot_N3[(end-burnin):end,3])/(1+geomean(sol_plot_N3[(end-burnin):end,5])*p_new_N3[12]*geomean(sol_plot_N3[(end-burnin):end,1])) )/
+    #    ( p_new_N3[7]*geomean(sol_plot_N3[(end-burnin):end,5])*geomean(sol_plot_N3[(end-burnin):end,1])*geomean(sol_plot_N3[(end-burnin):end,3])/(1+geomean(sol_plot_N3[(end-burnin):end,5])*p_new_N3[12]*geomean(sol_plot_N3[(end-burnin):end,1])) +
+    #    p_new_N3[8]*geomean(sol_plot_N3[(end-burnin):end,6])*geomean(sol_plot_N3[(end-burnin):end,2])*geomean(sol_plot_N3[(end-burnin):end,3])/(1+geomean(sol_plot_N3[(end-burnin):end,6])*p_new_N3[13]*geomean(sol_plot_N3[(end-burnin):end,2])) ) +
+    #    2*( 1 - ( p_new_N3[7]*geomean(sol_plot_N3[(end-burnin):end,5])*geomean(sol_plot_N3[(end-burnin):end,1])*geomean(sol_plot_N3[(end-burnin):end,3])/(1+geomean(sol_plot_N3[(end-burnin):end,5])*p_new_N3[12]*geomean(sol_plot_N3[(end-burnin):end,1])) )/
+    #        ( p_new_N3[7]*geomean(sol_plot_N3[(end-burnin):end,5])*geomean(sol_plot_N3[(end-burnin):end,1])*geomean(sol_plot_N3[(end-burnin):end,3])/(1+geomean(sol_plot_N3[(end-burnin):end,5])*p_new_N3[12]*geomean(sol_plot_N3[(end-burnin):end,1])) +
+    #        p_new_N3[8]*geomean(sol_plot_N3[(end-burnin):end,6])*geomean(sol_plot_N3[(end-burnin):end,2])*geomean(sol_plot_N3[(end-burnin):end,3])/(1+geomean(sol_plot_N3[(end-burnin):end,6])*p_new_N3[13]*geomean(sol_plot_N3[(end-burnin):end,2])) ))
+
+    # Mark in which cases the Int_pred attack rate reached levels large enough
+        # to cause TC bifurcation
+
+    slope_1[i] = minimum([maximum([(log(TL_1[i])-log(2))/(log(persist_N1[i])-log(persist_N12[i])),-1]),1])
+    slope_2[i] = minimum([maximum([(log(2)-log(1))/(log(persist_N12[i])-log(persist_N13[i])),-1]),1])
+    #slope_2[i] = minimum([maximum([(log(TL_2[i])-log(2))/(log(persist_N2[i])-log(persist_N22[i])),-1]),1])
+    #slope_3[i] = minimum([maximum([(log(TL_3[i])-log(2))/(log(persist_N3[i])-log(persist_N32[i])),-1]),1])
+
+    #slope_1[i] = (log(persist_N1[i])-log(persist_N12[i]))/(log(TL_1[i])-log(2))
+
+end
+
+
+combin2_N = hcat(combin_N[!isnan.(slope_1)]...)';
+#combin22_N = hcat(combin_N[!isnan.(slope_2)]...)';
+#combin23_N = hcat(combin_N[!isnan.(slope_3)]...)';
+TL_1 = TL_1[!isnan.(slope_1)];
+#TL_2 = TL_2[!isnan.(slope_2)];
+#TL_3 = TL_3[!isnan.(slope_3)];
+persist_N1 = persist_N1[!isnan.(slope_1)];persist_N2 = persist_N2[!isnan.(slope_2)];persist_N3 = persist_N3[!isnan.(slope_3)];
+persist_N12 = persist_N12[!isnan.(slope_1)];persist_N22 = persist_N22[!isnan.(slope_2)];persist_N32 = persist_N32[!isnan.(slope_3)];
+persist_N13 = persist_N13[!isnan.(slope_1)];
+
+slope_2 = slope_2[!isnan.(slope_1)];
+slope_1 = slope_1[!isnan.(slope_1)];
+
+diff=slope_2-slope_1;
+
+## needed to pass to plots in next section ("analyzing results")
+# Replace paths by whatever needed in your own computer
+save("/home/jp/JPJ_TL_evol/results_workspace.jld", "combin2_N",combin2_N,"TL_1",TL_1,"persist_N1",persist_N1,"persist_N12",persist_N12,"persist_N13",persist_N13, "slope_1",slope_1,"slope_2",slope_2, "diff",diff)
+
+
+
+####################################################################################
+### Analyzing results_workspace (FIGS 3 and 4)
+# Can load workspace by replacing PLACEHOLDER with the path to the results_workspace.jld file
+results=load("/Users/jeangibert/Desktop/JP/Papers_in_review_submitted/Justin_var_TL/plots/results_workspace.jld")
+
+combin2_N = results["combin2_N"];
+TL_1 = results["TL_1"];
+
+
+#-----------------------------------------------------------------------
+## 1) FOOD WEB NUMERICAL STRUCTURE (AS IN PYRAMID OF NUMBERS)
+
+# Find extinction conditions for top predator
+top_extinct=find(x-> x < 0.01,results["persist_N1"]);
+# Find extinction conditions for interm predator
+int_extinct=find(x-> x < 0.01,results["persist_N12"]);
+# take the union of the two sets: you get the extinction conditions
+extinct=union(top_extinct,int_extinct);
+
+# Find places where int>top
+int_top = find(x -> x>0.0, results["persist_N12"]-results["persist_N1"]);
+# Find places where top>int
+top_int = find(x -> x>0.0, results["persist_N1"]-results["persist_N12"]);
+# Find places where int>basal
+int_basal = find(x -> x>0.0, results["persist_N12"]-results["persist_N13"]);
+
+# Find where the slope of the top < slope int pred
+slope_int = find(x -> x<0.0, results["slope_1"]-results["slope_2"]);
+int_slope_int = intersect(int_top,slope_int)
+
+R"
+blues <- colorRampPalette(brewer.pal(8,'Set3'))(8)
+
+#png(filename='/Users/jeangibert/Desktop/JP/Papers_in_review_submitted/Justin_var_TL/Manuscript/Figures/Fig_3/Fig_3_A.png',
+#    units='in',width=7,height=7,pointsize=12,res=1200)
+par(oma=c(1,1,0,0))
+plot($combin2_N[$int_top,], pch=16,cex=0.5, col=blues[5],
+las = TRUE, axes=FALSE, ylab='', xlab='')
+box(lwd=4)
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.3, lwd.ticks=4,mgp=c(3, .5, 0))
+axis(2,at=seq(0,2,0.5), tck=0.015, las=TRUE, cex.axis=1.3,lwd.ticks=4,mgp=c(3, .5, 0))
+mtext(TeX('Top predator tradeoff ($\\gamma_{CT}$)'),1, line=2.7, cex=1.8)
+mtext(TeX('Consumer tradeoff ($\\gamma_{RC}$)'),2,line=2.5, cex=1.8)
+
+points($combin2_N[$top_int,], pch=16,cex=0.5, col=blues[2])
+points($combin2_N[$top_extinct,], pch=16,cex=0.5, col='grey')
+points($combin2_N[$int_extinct,], pch=16,cex=0.5, col='grey')
+points($combin2_N[$int_slope_int,], pch=16,cex=0.5, col=blues[7])
+points($combin2_N[$int_basal,], pch=16,cex=0.5, col=blues[6])
+#abline(0,1, lwd=2)
+
+#dev.off()
+"
+
+
+#-----------------------------------------------------------------------
+## 2) MAXIMUM TROPHIC LEVEL
+
+
+# Find places where int>basal to define TL levels for plotting
+TL_verylow = find(x -> x>0.0, 2.10-results["TL_1"]);
+TL_verylow2 = find(x -> x>0.0, 2.25-results["TL_1"]);
+TL_low = find(x -> x>0.0, 2.35-results["TL_1"]);
+TL_low2 = find(x -> x>0.0, 2.45-results["TL_1"]);
+TL_mid = find(x -> x>0.0, 2.55-results["TL_1"]);
+TL_mid2 = find(x -> x>0.0, 2.65-results["TL_1"]);
+TL_high = find(x -> x>0.0, 2.75-results["TL_1"]);
+TL_high2 = find(x -> x>0.0, 2.8-results["TL_1"]);
+TL_veryhigh = find(x -> x>0.0, 2.9-results["TL_1"]);
+TL_veryhigh2 = find(x -> x<0.0, 2.9-results["TL_1"]);
+
+
+## More levels version
+R"
+blues <- colorRampPalette(brewer.pal(9,'Blues'))(10)
+
+#png(filename='/Users/jeangibert/Desktop/JP/Papers_in_review_submitted/Justin_var_TL/Manuscript/Figures/Fig_3/Fig_3_B_alt.png',
+#    units='in',width=7,height=7,pointsize=12,res=1200)
+par(oma=c(1,1,0,0))
+plot($combin2_N[$top_extinct,], pch=16,cex=0.5, col=blues[10],
+las = TRUE, axes=FALSE, ylab='', xlab='')
+box(lwd=4)
+axis(1,at=seq(0,2,0.5),tck=0.015, cex.axis=1.3, lwd.ticks=4,mgp=c(3, .5, 0))
+axis(2,at=seq(0,2,0.5),tck=0.015, las=TRUE, cex.axis=1.3,lwd.ticks=4,mgp=c(3, .5, 0))
+mtext(TeX('Top predator tradeoff ($\\gamma_{CT}$)'),1, line=2.7, cex=1.8)
+#mtext(TeX('Consumer tradeoff ($\\gamma_{RC}$)'),2,line=2.5, cex=1.8)
+
+points($combin2_N[$TL_veryhigh2,], pch=16,cex=0.5, col=blues[10])
+points($combin2_N[$TL_veryhigh,], pch=16,cex=0.5, col=blues[9])
+points($combin2_N[$TL_high2,], pch=16,cex=0.5, col=blues[8])
+points($combin2_N[$TL_high,], pch=16,cex=0.5, col=blues[7])
+points($combin2_N[$TL_mid2,], pch=16,cex=0.5, col=blues[6])
+points($combin2_N[$TL_mid,], pch=16,cex=0.5, col=blues[5])
+points($combin2_N[$TL_low2,], pch=16,cex=0.5, col=blues[4])
+points($combin2_N[$TL_low,], pch=16,cex=0.5, col=blues[3])
+points($combin2_N[$TL_verylow2,], pch=16,cex=0.5, col=blues[2])
+points($combin2_N[$TL_verylow,], pch=16,cex=0.5, col=blues[1])
+points($combin2_N[$int_extinct,], pch=16,cex=0.5, col='grey')
+points($combin2_N[$top_extinct,], pch=16,cex=0.5, col='grey')
+contour($TL_1)
+
+#dev.off()
+"
+
+#-----------------------------------------------------------------------
+## 3) BIOMASS structure
+combin2_N = results["combin2_N"];
+TL_1 = results["TL_1"];
+## We analyze three different P:P body size ratio:
+# M_pred = 1.81*M^0.85
+# M_pred = 1.81*M^1.16
+# M_pred = 1.81*M^1.25
+
+M_int_1 = 1.81*1.25^0.8;M_top_1 = 1.81*M_int_1^0.9;
+M_int_2 = 1.81*1.25^1.16;M_top_2 = 1.81*M_int_1^1.16;
+M_int_3 = 1.81*1.25^1.5;M_top_3 = 1.81*M_int_1^1.5;
+
+## i) SLOPE = 0.85
+# Find extinction conditions for top predator
+top_extinct1 = find(x-> x < 0.01,results["persist_N1"]*M_top_1);
+# Find extinction conditions for interm predator
+int_extinct1 = find(x-> x < 0.01,results["persist_N12"]*M_int_1);
+# take the union of the two sets: you get the extinction conditions
+extinct1 = union(top_extinct1,int_extinct1);
+
+# Find places where int>top
+int_top1 = find(x -> x>0.0, results["persist_N12"]*M_int_1-results["persist_N1"]*M_top_1);
+# Find places where top>int
+top_int1 = find(x -> x>0.0, results["persist_N1"]*M_top_1-results["persist_N12"]*M_int_1);
+# Find places where int>basal
+int_basal1 = find(x -> x>0.0, results["persist_N12"]*M_int_1-results["persist_N13"]*1.25);
+
+# Find where the slope of the top < slope int pred
+slope_top1 = (log(TL_1)-log(2))./(log(results["persist_N1"]*M_top_1)-log(results["persist_N12"]*M_int_1))
+slope_int1 = (log(2)-log(1))./(log(results["persist_N1"]*M_top_1)-log(results["persist_N13"]*1.25))
+
+slope_int1 = find(x -> x<0.0, slope_top1-slope_int1 );
+int_top_int1 = intersect(slope_int1,int_top1);
+
+R"
+blues <- colorRampPalette(brewer.pal(8,'Set3'))(8)
+dev.new()
+
+plot($combin2_N[$int_top1,], pch=16,cex=0.5, col=blues[5],
+las = TRUE, axes=FALSE, ylab='', xlab='')
+box(lwd=2)
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,2,0.5), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+mtext('Top predator tradeoff',1, line=2.2, cex=1.5)
+mtext('Intermediate predator tradeoff',2,line=2.7, cex=1.5)
+
+points($combin2_N[$top_int1,], pch=16,cex=0.5, col=blues[2])
+points($combin2_N[$top_extinct1,], pch=16,cex=0.5, col='grey')
+points($combin2_N[$int_extinct1,], pch=16,cex=0.5, col='grey')
+points($combin2_N[$int_top_int1,], pch=16,cex=0.5, col=blues[7])
+points($combin2_N[$int_basal1,], pch=16,cex=0.5, col=blues[6])
+#abline(0,1, lwd=2)
+"
+
+## ii) SLOPE = 1.16
+# Find extinction conditions for top predator
+top_extinct2 = find(x-> x < 0.01,results["persist_N1"]*M_top_2);
+# Find extinction conditions for interm predator
+int_extinct2 = find(x-> x < 0.01,results["persist_N12"]*M_int_2);
+# take the union of the two sets: you get the extinction conditions
+extinct2 = union(top_extinct2,int_extinct2);
+
+# Find places where int>top
+int_top2 = find(x -> x>0.0, results["persist_N12"]*M_int_2-results["persist_N1"]*M_top_2);
+# Find places where top>int
+top_int2 = find(x -> x>0.0, results["persist_N1"]*M_top_2-results["persist_N12"]*M_int_2);
+# Find places where int>basal
+int_basal2 = find(x -> x>0.0, results["persist_N12"]*M_int_2-results["persist_N13"]*1.25);
+
+# Find where the slope of the top < slope int pred
+slope_top2 = (log(TL_1)-log(2))./(log(results["persist_N1"]*M_top_2)-log(results["persist_N12"]*M_int_2))
+slope_int2 = (log(2)-log(1))./(log(results["persist_N1"]*M_top_2)-log(results["persist_N13"]*1.25))
+
+slope_int2 = find(x -> x<0.0, slope_top2-slope_int2 );
+int_top_int2 = intersect(slope_int2,int_top2);
+
+R"
+blues <- colorRampPalette(brewer.pal(8,'Set3'))(8)
+dev.new()
+
+plot($combin2_N[$int_top2,], pch=16,cex=0.5, col=blues[5],
+las = TRUE, axes=FALSE, ylab='', xlab='')
+box(lwd=2)
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,2,0.5), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+mtext('Top predator tradeoff',1, line=2.2, cex=1.5)
+mtext('Intermediate predator tradeoff',2,line=2.7, cex=1.5)
+
+points($combin2_N[$top_int2,], pch=16,cex=0.5, col=blues[2])
+points($combin2_N[$int_top_int2,], pch=16,cex=0.5, col=blues[7])
+points($combin2_N[$int_basal2,], pch=16,cex=0.5, col=blues[6])
+points($combin2_N[$top_extinct2,], pch=16,cex=0.5, col='grey')
+points($combin2_N[$int_extinct2,], pch=16,cex=0.5, col='grey')
+#abline(0,1, lwd=2)
+"
+
+## ii) SLOPE = 1.5
+# Find extinction conditions for top predator
+top_extinct3 = find(x-> x < 0.01,results["persist_N1"]*M_top_3);
+# Find extinction conditions for interm predator
+int_extinct3 = find(x-> x < 0.01,results["persist_N12"]*M_int_3);
+# take the union of the two sets: you get the extinction conditions
+extinct3 = union(top_extinct3,int_extinct3);
+
+# Find places where int>top
+int_top3 = find(x -> x>0.0, results["persist_N12"]*M_int_3-results["persist_N1"]*M_top_3);
+# Find places where top>int
+top_int3 = find(x -> x>0.0, results["persist_N1"]*M_top_3-results["persist_N12"]*M_int_3);
+# Find places where int>basal
+int_basal3 = find(x -> x>0.0, results["persist_N12"]*M_int_3-results["persist_N13"]*1.25);
+
+# Find where the slope of the top < slope int pred
+slope_top3 = (log(TL_1)-log(2))./(log(results["persist_N1"]*M_top_3)-log(results["persist_N12"]*M_int_3))
+slope_int3 = (log(2)-log(1))./(log(results["persist_N1"]*M_top_3)-log(results["persist_N13"]*1.25))
+
+slope_int3 = find(x -> x<0.0, slope_top3 - slope_int3 );
+int_top_int3 = intersect(slope_int3,int_top3);
+
+R"
+blues <- colorRampPalette(brewer.pal(8,'Set3'))(8)
+dev.new()
+
+plot($combin2_N[$int_top3,], pch=16,cex=0.5, col=blues[5],
+las = TRUE, axes=FALSE, ylab='', xlab='')
+box(lwd=2)
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.15, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,2,0.5), tck=0.015, las=TRUE, cex.axis=1.15,lwd.ticks=2,mgp=c(3, .5, 0))
+mtext('Top predator tradeoff',1, line=2.2, cex=1.5)
+mtext('Intermediate predator tradeoff',2,line=2.7, cex=1.5)
+
+points($combin2_N[$top_int3,], pch=16,cex=0.5, col=blues[2])
+points($combin2_N[$int_top_int3,], pch=16,cex=0.5, col=blues[7])
+points($combin2_N[$int_basal3,], pch=16,cex=0.5, col=blues[6])
+points($combin2_N[$top_extinct3,], pch=16,cex=0.5, col='grey')
+points($combin2_N[$int_extinct3,], pch=16,cex=0.5, col='grey')
+#abline(0,1, lwd=2)
+"
+
+##### BIOMASS plots
+
+# M_pred = 1.81*M^0.85
+# M_pred = 1.81*M^1.16
+# M_pred = 1.81*M^1.50
+
+R"
+blues <- colorRampPalette(brewer.pal(8,'Set3'))(8)
+
+png(filename='/Users/jeangibert/Desktop/JP/Papers_in_review_submitted/Justin_var_TL/Manuscript/Figures/Fig_4/Fig_4.png',
+    units='in',width=7.5,height=6.5,pointsize=12,res=1200)
+
+par(mfrow=c(2,2),mar=c(3.5, 4.5, 0.5, 0.5),oma=c(1.5,2,1,1))
+
+plot(1, pch=16,cex=0.5, col='white',
+las = TRUE, axes=FALSE, ylab='', xlab='',ylim=c(0,4),xlim=c(0,3))
+box(lwd=2)
+axis(1,at=seq(0,4,1), tck=0.015, cex.axis=1.1, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,4,1), tck=0.015, las=TRUE, cex.axis=1.1,lwd.ticks=2,mgp=c(3, .5, 0))
+abline(a=log(1.81), b=0.85, lwd=2, col=rgb(0.8,0.8,0.8))
+abline(a=log(1.81), b=1.16, lwd=2, col=rgb(0.6,0.6,0.6))
+abline(a=log(1.81), b=1.5, lwd=2, col=rgb(0,0,0))
+mtext('Prey body size',1, line=1.7, cex=1.15)
+mtext('Predator body size',2,line=1.8, cex=1.15)
+
+plot($combin2_N[$int_top1,], pch=16,cex=0.5, col=blues[5],
+las = TRUE, axes=FALSE, ylab='', xlab='')
+box(lwd=2)
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.1, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,2,0.5), tck=0.015, las=TRUE, cex.axis=1.1,lwd.ticks=2,mgp=c(3, .5, 0))
+#mtext(TeX('Top predator tradeoff ($\\gamma_{CT}$)'),1, line=2, cex=1.15)
+mtext(TeX('Consumer tradeoff ($\\gamma_{RC}$)'),2,line=2, cex=1.15)
+points($combin2_N[$top_int1,], pch=16,cex=0.5, col=blues[2])
+points($combin2_N[$top_extinct1,], pch=16,cex=0.5, col='grey')
+points($combin2_N[$int_extinct1,], pch=16,cex=0.5, col='grey')
+points($combin2_N[$int_top_int1,], pch=16,cex=0.5, col=blues[7])
+points($combin2_N[$int_basal1,], pch=16,cex=0.5, col=blues[6])
+
+plot($combin2_N[$int_top2,], pch=16,cex=0.5, col=blues[5],
+las = TRUE, axes=FALSE, ylab='', xlab='')
+box(lwd=2)
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.1, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,2,0.5), tck=0.015, las=TRUE, cex.axis=1.1,lwd.ticks=2,mgp=c(3, .5, 0))
+mtext(TeX('Top predator tradeoff ($\\gamma_{CT}$)'),1, line=2, cex=1.15)
+mtext(TeX('Consumer tradeoff ($\\gamma_{RC}$)'),2,line=2, cex=1.15)
+points($combin2_N[$top_int2,], pch=16,cex=0.5, col=blues[2])
+points($combin2_N[$int_top_int2,], pch=16,cex=0.5, col=blues[7])
+points($combin2_N[$int_basal2,], pch=16,cex=0.5, col=blues[6])
+points($combin2_N[$top_extinct2,], pch=16,cex=0.5, col='grey')
+points($combin2_N[$int_extinct2,], pch=16,cex=0.5, col='grey')
+
+plot($combin2_N[$int_top3,], pch=16,cex=0.5, col=blues[5],
+las = TRUE, axes=FALSE, ylab='', xlab='')
+box(lwd=2)
+axis(1,at=seq(0,2,0.5), tck=0.015, cex.axis=1.1, lwd.ticks=2,mgp=c(3, .5, 0))
+axis(2,at=seq(0,2,0.5), tck=0.015, las=TRUE, cex.axis=1.1,lwd.ticks=2,mgp=c(3, .5, 0))
+mtext(TeX('Top predator tradeoff ($\\gamma_{CT}$)'),1, line=2, cex=1.15)
+#mtext('Intermediate predator tradeoff',2,line=2.7, cex=1.5)
+points($combin2_N[$top_int3,], pch=16,cex=0.5, col=blues[2])
+points($combin2_N[$int_top_int3,], pch=16,cex=0.5, col=blues[7])
+points($combin2_N[$int_basal3,], pch=16,cex=0.5, col=blues[6])
+points($combin2_N[$top_extinct3,], pch=16,cex=0.5, col='grey')
+points($combin2_N[$int_extinct3,], pch=16,cex=0.5, col='grey')
+
+dev.off()
+"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+THE END
